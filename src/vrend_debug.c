@@ -27,6 +27,9 @@
 #include "util/u_debug.h"
 #include <stdlib.h>
 #include <stdio.h>
+#ifdef _WIN32
+   #include <process.h>
+#endif
 
 static const char *command_names[VIRGL_MAX_COMMANDS] = {
    "NOP",
@@ -129,12 +132,22 @@ int vrend_get_debug_flags(const char *flagstring)
     * from the environment. The alternative to using setenv would be to
     * duplicate code or to change the gallium/util intefaces and diverge more
     * from mesa. So just stick to the environment variable. */
-   snprintf(buf, 1024, "VREND_TEMP_DEBUG_STRING_%d", getpid());
-   setenv(buf, flagstring, 1);
+   #ifdef _WIN32
+      snprintf(buf, 1024, "VREND_TEMP_DEBUG_STRING_%d", _getpid());
+      _putenv_s(buf, flagstring);
+   #else 
+      snprintf(buf, 1024, "VREND_TEMP_DEBUG_STRING_%d", getpid());
+      setenv(buf, flagstring, 1);
+   #endif
 
    retval = (int)debug_get_flags_option(buf,
                                         vrend_debug_options, 0);
-   unsetenv(buf);
+   #ifdef _WIN32
+      _putenv_s(buf, "");
+   #else
+      unsetenv(buf);
+   #endif
+      
    return retval;
 }
 
