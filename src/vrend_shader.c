@@ -178,9 +178,8 @@ struct dump_ctx {
    uint32_t req_local_mem;
    bool integer_memory;
 
-   uint32_t num_ubo;
    uint32_t ubo_base;
-   int ubo_idx[32];
+   uint32_t ubo_used_mask;
    int ubo_sizes[32];
    uint32_t num_address;
 
@@ -1240,13 +1239,16 @@ iter_declaration(struct tgsi_iterate_context *iter,
       break;
    case TGSI_FILE_CONSTANT:
       if (decl->Declaration.Dimension && decl->Dim.Index2D != 0) {
-         if (ctx->num_ubo >= ARRAY_SIZE(ctx->ubo_idx)) {
-            fprintf(stderr, "Number of uniforms exceeded, max is %lu\n", ARRAY_SIZE(ctx->ubo_idx));
+         if (decl->Dim.Index2D > 31) {
+            fprintf(stderr, "Number of uniforms exceeded, max is 32\n");
             return false;
          }
-         ctx->ubo_idx[ctx->num_ubo] = decl->Dim.Index2D;
-         ctx->ubo_sizes[ctx->num_ubo] = decl->Range.Last + 1;
-         ctx->num_ubo++;
+         if (ctx->ubo_used_mask & (1 << decl->Dim.Index2D)) {
+            fprintf(stderr, "UBO #%d is already defined\n", decl->Dim.Index2D);
+            return false;
+         }
+         ctx->ubo_used_mask |= (1 << decl->Dim.Index2D);
+         ctx->ubo_sizes[decl->Dim.Index2D] = decl->Range.Last + 1;
       } else {
          /* if we have a normal single const set then ubo base should be 1 */
          ctx->ubo_base = 1;
@@ -3927,7 +3929,7 @@ static void emit_header(struct dump_ctx *ctx)
       if (ctx->prog_type == TGSI_PROCESSOR_FRAGMENT && fs_emit_layout(ctx))
          emit_ext(ctx, "ARB_fragment_coord_conventions", "require");
 
-      if (ctx->num_ubo)
+      if (ctx->ubo_used_mask)
          emit_ext(ctx, "ARB_uniform_buffer_object", "require");
 
       if (ctx->num_cull_dist_prop || ctx->key->prev_stage_num_cull_out)
@@ -4238,332 +4240,11 @@ static void emit_image_decl(struct dump_ctx *ctx,
                access, volatile_str, precision, ptc, stc, sname, i);
 }
 
-static void emit_ios(struct dump_ctx *ctx)
+static void emit_ios_common(struct dump_ctx *ctx)
 {
-   uint32_t i;
-   char postfix[8];
-   const char *prefix = "", *auxprefix = "";
-   bool fcolor_emitted[2], bcolor_emitted[2];
-   uint32_t nsamp;
+   uint i;
    const char *sname = tgsi_proc_to_prefix(ctx->prog_type);
-   ctx->num_interps = 0;
 
-   if (ctx->so && ctx->so->num_outputs >= PIPE_MAX_SO_OUTPUTS) {
-      fprintf(stderr, "Num outputs exceeded, max is %u\n", PIPE_MAX_SO_OUTPUTS);
-      set_hdr_error(ctx);
-      return;
-   }
-
-   if (ctx->key->color_two_side) {
-      fcolor_emitted[0] = fcolor_emitted[1] = false;
-      bcolor_emitted[0] = bcolor_emitted[1] = false;
-   }
-   if (ctx->prog_type == TGSI_PROCESSOR_FRAGMENT) {
-      if (fs_emit_layout(ctx)) {
-         bool upper_left = !(ctx->fs_coord_origin ^ ctx->key->invert_fs_origin);
-         char comma = (upper_left && ctx->fs_pixel_center) ? ',' : ' ';
-
-         emit_hdrf(ctx, "layout(%s%c%s) in vec4 gl_FragCoord;\n",
-                  upper_left ? "origin_upper_left" : "",
-                  comma,
-                  ctx->fs_pixel_center ? "pixel_center_integer" : "");
-      }
-      if (ctx->early_depth_stencil) {
-         emit_hdr(ctx, "layout(early_fragment_tests) in;\n");
-      }
-   }
-
-   if (ctx->prog_type == TGSI_PROCESSOR_COMPUTE) {
-      emit_hdrf(ctx, "layout (local_size_x = %d, local_size_y = %d, local_size_z = %d) in;\n",
-               ctx->local_cs_block_size[0], ctx->local_cs_block_size[1], ctx->local_cs_block_size[2]);
-
-      if (ctx->req_local_mem) {
-         enum vrend_type_qualifier type = ctx->integer_memory ? INT : UINT;
-         emit_hdrf(ctx, "shared %s values[%d];\n", get_string(type), ctx->req_local_mem / 4);
-      }
-   }
-
-   if (ctx->prog_type == TGSI_PROCESSOR_GEOMETRY) {
-      char invocbuf[25];
-
-      if (ctx->gs_num_invocations)
-         snprintf(invocbuf, 25, ", invocations = %d", ctx->gs_num_invocations);
-
-      emit_hdrf(ctx, "layout(%s%s) in;\n", prim_to_name(ctx->gs_in_prim),
-               ctx->gs_num_invocations > 1 ? invocbuf : "");
-      emit_hdrf(ctx, "layout(%s, max_vertices = %d) out;\n", prim_to_name(ctx->gs_out_prim), ctx->gs_max_out_verts);
-   }
-
-   if (ctx_indirect_inputs(ctx)) {
-      const char *name_prefix = get_stage_input_name_prefix(ctx, ctx->prog_type);
-      if (ctx->prog_type == TGSI_PROCESSOR_TESS_EVAL) {
-         if (ctx->patch_input_range.used) {
-            int size = ctx->patch_input_range.last - ctx->patch_input_range.first + 1;
-            if (size < ctx->key->num_indirect_patch_inputs)
-               size = ctx->key->num_indirect_patch_inputs;
-            emit_hdrf(ctx, "patch in vec4 %sp%d[%d];\n", name_prefix, ctx->patch_input_range.first, size);
-         }
-      }
-
-      if (ctx->prog_type == TGSI_PROCESSOR_TESS_CTRL ||
-          ctx->prog_type == TGSI_PROCESSOR_TESS_EVAL) {
-         if (ctx->generic_input_range.used) {
-            int size = ctx->generic_input_range.last - ctx->generic_input_range.first + 1;
-            if (size < ctx->key->num_indirect_generic_inputs)
-               size = ctx->key->num_indirect_generic_inputs;
-            emit_hdrf(ctx, "in block { vec4 %s%d[%d]; } blk[];\n", name_prefix, ctx->generic_input_range.first, size);
-         }
-      }
-   }
-   for (i = 0; i < ctx->num_inputs; i++) {
-      if (!ctx->inputs[i].glsl_predefined_no_emit) {
-         if (ctx->prog_type == TGSI_PROCESSOR_VERTEX && ctx->cfg->use_explicit_locations) {
-            emit_hdrf(ctx, "layout(location=%d) ", ctx->inputs[i].first);
-         }
-         prefix = "";
-         auxprefix = "";
-         if (ctx->prog_type == TGSI_PROCESSOR_TESS_EVAL && ctx->inputs[i].name == TGSI_SEMANTIC_PATCH)
-            prefix = "patch ";
-         else if (ctx->prog_type == TGSI_PROCESSOR_FRAGMENT &&
-             (ctx->inputs[i].name == TGSI_SEMANTIC_GENERIC ||
-              ctx->inputs[i].name == TGSI_SEMANTIC_COLOR ||
-              ctx->inputs[i].name == TGSI_SEMANTIC_BCOLOR)) {
-            prefix = get_interp_string(ctx->cfg, ctx->inputs[i].interpolate, ctx->key->flatshade);
-            if (!prefix)
-               prefix = "";
-            auxprefix = get_aux_string(ctx->inputs[i].location);
-            ctx->num_interps++;
-         }
-
-         if (ctx->prog_type == TGSI_PROCESSOR_GEOMETRY) {
-            snprintf(postfix, 8, "[%d]", gs_input_prim_to_size(ctx->gs_in_prim));
-         } else if (ctx->prog_type == TGSI_PROCESSOR_TESS_CTRL ||
-                    (ctx->prog_type == TGSI_PROCESSOR_TESS_EVAL && ctx->inputs[i].name != TGSI_SEMANTIC_PATCH)) {
-            snprintf(postfix, 8, "[]");
-         } else
-            postfix[0] = 0;
-         emit_hdrf(ctx, "%s%sin vec4 %s%s;\n", prefix, auxprefix, ctx->inputs[i].glsl_name, postfix);
-      }
-
-      if (ctx->prog_type == TGSI_PROCESSOR_FRAGMENT && ctx->cfg->use_gles &&
-          !ctx->key->winsys_adjust_y_emitted &&
-         (ctx->key->coord_replace & (1 << ctx->inputs[i].sid))) {
-         ctx->key->winsys_adjust_y_emitted = true;
-         emit_hdr(ctx, "uniform float winsys_adjust_y;\n");
-      }
-   }
-   if (ctx->prog_type == TGSI_PROCESSOR_TESS_CTRL) {
-      emit_hdrf(ctx, "layout(vertices = %d) out;\n", ctx->tcs_vertices_out);
-   }
-   if (ctx->prog_type == TGSI_PROCESSOR_TESS_EVAL) {
-      emit_hdrf(ctx, "layout(%s, %s, %s%s) in;\n",
-               prim_to_tes_name(ctx->tes_prim_mode),
-               get_spacing_string(ctx->tes_spacing),
-               ctx->tes_vertex_order ? "cw" : "ccw",
-               ctx->tes_point_mode ? ", point_mode" : "");
-   }
-
-   if (ctx_indirect_outputs(ctx)) {
-      const char *name_prefix = get_stage_output_name_prefix(ctx->prog_type);
-      if (ctx->prog_type == TGSI_PROCESSOR_VERTEX) {
-         if (ctx->generic_output_range.used) {
-            emit_hdrf(ctx, "out block { vec4 %s%d[%d]; } oblk;\n", name_prefix, ctx->generic_output_range.first, ctx->generic_output_range.last - ctx->generic_output_range.first + 1);
-         }
-      }
-      if (ctx->prog_type == TGSI_PROCESSOR_TESS_CTRL) {
-         if (ctx->generic_output_range.used) {
-            emit_hdrf(ctx, "out block { vec4 %s%d[%d]; } oblk[];\n", name_prefix, ctx->generic_output_range.first, ctx->generic_output_range.last - ctx->generic_output_range.first + 1);
-         }
-         if (ctx->patch_output_range.used) {
-            emit_hdrf(ctx, "patch out vec4 %sp%d[%d];\n", name_prefix, ctx->patch_output_range.first, ctx->patch_output_range.last - ctx->patch_output_range.first + 1);
-         }
-      }
-   }
-
-   if (ctx->write_all_cbufs) {
-      for (i = 0; i < (uint32_t)ctx->cfg->max_draw_buffers; i++) {
-         if (ctx->cfg->use_gles)
-            emit_hdrf(ctx, "layout (location=%d) out vec4 fsout_c%d;\n", i, i);
-         else
-            emit_hdrf(ctx, "out vec4 fsout_c%d;\n", i);
-      }
-   } else {
-      for (i = 0; i < ctx->num_outputs; i++) {
-         if (ctx->prog_type == TGSI_PROCESSOR_VERTEX && ctx->key->color_two_side && ctx->outputs[i].sid < 2) {
-            if (ctx->outputs[i].name == TGSI_SEMANTIC_COLOR)
-               fcolor_emitted[ctx->outputs[i].sid] = true;
-            if (ctx->outputs[i].name == TGSI_SEMANTIC_BCOLOR)
-               bcolor_emitted[ctx->outputs[i].sid] = true;
-         }
-         if (!ctx->outputs[i].glsl_predefined_no_emit) {
-            if ((ctx->prog_type == TGSI_PROCESSOR_VERTEX ||
-                 ctx->prog_type == TGSI_PROCESSOR_GEOMETRY ||
-                 ctx->prog_type == TGSI_PROCESSOR_TESS_EVAL) &&
-                (ctx->outputs[i].name == TGSI_SEMANTIC_GENERIC ||
-                 ctx->outputs[i].name == TGSI_SEMANTIC_COLOR ||
-                 ctx->outputs[i].name == TGSI_SEMANTIC_BCOLOR)) {
-               ctx->num_interps++;
-               prefix = INTERP_PREFIX;
-            } else
-               prefix = "";
-            /* ugly leave spaces to patch interp in later */
-            if (ctx->prog_type == TGSI_PROCESSOR_TESS_CTRL) {
-               if (ctx->outputs[i].name == TGSI_SEMANTIC_PATCH)
-                  emit_hdrf(ctx, "patch out vec4 %s;\n", ctx->outputs[i].glsl_name);
-               else
-                  emit_hdrf(ctx, "%sout vec4 %s[];\n", prefix, ctx->outputs[i].glsl_name);
-            } else if (ctx->prog_type == TGSI_PROCESSOR_GEOMETRY && ctx->outputs[i].stream)
-               emit_hdrf(ctx, "layout (stream = %d) %s%s%sout vec4 %s;\n", ctx->outputs[i].stream, prefix,
-                        ctx->outputs[i].precise ? "precise " : "",
-                        ctx->outputs[i].invariant ? "invariant " : "",
-                        ctx->outputs[i].glsl_name);
-            else
-               emit_hdrf(ctx, "%s%s%s%s vec4 %s;\n",
-                        prefix,
-                        ctx->outputs[i].precise ? "precise " : "",
-                        ctx->outputs[i].invariant ? "invariant " : "",
-                        ctx->outputs[i].fbfetch_used ? "inout" : "out",
-                        ctx->outputs[i].glsl_name);
-         } else if (ctx->outputs[i].invariant || ctx->outputs[i].precise) {
-            emit_hdrf(ctx, "%s%s;\n",
-               ctx->outputs[i].precise ? "precise " :
-               (ctx->outputs[i].invariant ? "invariant " : ""),
-               ctx->outputs[i].glsl_name);
-         }
-      }
-   }
-
-   if (ctx->prog_type == TGSI_PROCESSOR_VERTEX && ctx->key->color_two_side) {
-      for (i = 0; i < 2; i++) {
-         if (fcolor_emitted[i] && !bcolor_emitted[i]) {
-            emit_hdrf(ctx, "%sout vec4 ex_bc%d;\n", INTERP_PREFIX, i);
-         }
-         if (bcolor_emitted[i] && !fcolor_emitted[i]) {
-            emit_hdrf(ctx, "%sout vec4 ex_c%d;\n", INTERP_PREFIX, i);
-         }
-      }
-   }
-
-   if (ctx->prog_type == TGSI_PROCESSOR_VERTEX ||
-       ctx->prog_type == TGSI_PROCESSOR_GEOMETRY ||
-       ctx->prog_type == TGSI_PROCESSOR_TESS_EVAL) {
-      emit_hdr(ctx, "uniform float winsys_adjust_y;\n");
-   }
-
-   if (ctx->prog_type == TGSI_PROCESSOR_VERTEX) {
-      if (ctx->has_clipvertex) {
-         emit_hdrf(ctx, "%svec4 clipv_tmp;\n", ctx->has_clipvertex_so ? "out " : "");
-      }
-      if (ctx->num_clip_dist || ctx->key->clip_plane_enable) {
-         bool has_prop = (ctx->num_clip_dist_prop + ctx->num_cull_dist_prop) > 0;
-         int num_clip_dists = ctx->num_clip_dist ? ctx->num_clip_dist : 8;
-         int num_cull_dists = 0;
-         char cull_buf[64] = { 0 };
-         char clip_buf[64] = { 0 };
-         if (has_prop) {
-            num_clip_dists = ctx->num_clip_dist_prop;
-            num_cull_dists = ctx->num_cull_dist_prop;
-            if (num_clip_dists)
-               snprintf(clip_buf, 64, "out float gl_ClipDistance[%d];\n", num_clip_dists);
-            if (num_cull_dists)
-               snprintf(cull_buf, 64, "out float gl_CullDistance[%d];\n", num_cull_dists);
-         } else
-            snprintf(clip_buf, 64, "out float gl_ClipDistance[%d];\n", num_clip_dists);
-         if (ctx->key->clip_plane_enable) {
-            emit_hdr(ctx, "uniform vec4 clipp[8];\n");
-         }
-         if (ctx->key->gs_present || ctx->key->tes_present) {
-            ctx->vs_has_pervertex = true;
-            emit_hdrf(ctx, "out gl_PerVertex {\n vec4 gl_Position;\n float gl_PointSize;\n%s%s};\n", clip_buf, cull_buf);
-         } else {
-            emit_hdrf(ctx, "%s%s", clip_buf, cull_buf);
-         }
-         emit_hdr(ctx, "vec4 clip_dist_temp[2];\n");
-      }
-   }
-
-   if (ctx->prog_type == TGSI_PROCESSOR_GEOMETRY) {
-      if (ctx->num_in_clip_dist || ctx->key->clip_plane_enable || ctx->key->prev_stage_pervertex_out) {
-         int clip_dist, cull_dist;
-         char clip_var[64] = {}, cull_var[64] = {};
-
-         clip_dist = ctx->key->prev_stage_num_clip_out ? ctx->key->prev_stage_num_clip_out : ctx->num_in_clip_dist;
-         cull_dist = ctx->key->prev_stage_num_cull_out;
-
-         if (clip_dist)
-            snprintf(clip_var, 64, "float gl_ClipDistance[%d];\n", clip_dist);
-         if (cull_dist)
-            snprintf(cull_var, 64, "float gl_CullDistance[%d];\n", cull_dist);
-
-         emit_hdrf(ctx, "in gl_PerVertex {\n vec4 gl_Position;\n float gl_PointSize; \n %s%s\n} gl_in[];\n", clip_var, cull_var);
-      }
-      if (ctx->num_clip_dist) {
-         bool has_prop = (ctx->num_clip_dist_prop + ctx->num_cull_dist_prop) > 0;
-         int num_clip_dists = ctx->num_clip_dist ? ctx->num_clip_dist : 8;
-         int num_cull_dists = 0;
-         char cull_buf[64] = { 0 };
-         char clip_buf[64] = { 0 };
-         if (has_prop) {
-            num_clip_dists = ctx->num_clip_dist_prop;
-            num_cull_dists = ctx->num_cull_dist_prop;
-            if (num_clip_dists)
-               snprintf(clip_buf, 64, "out float gl_ClipDistance[%d];\n", num_clip_dists);
-            if (num_cull_dists)
-               snprintf(cull_buf, 64, "out float gl_CullDistance[%d];\n", num_cull_dists);
-         } else
-            snprintf(clip_buf, 64, "out float gl_ClipDistance[%d];\n", num_clip_dists);
-         emit_hdrf(ctx, "%s%s\n", clip_buf, cull_buf);
-         emit_hdrf(ctx, "vec4 clip_dist_temp[2];\n");
-      }
-   }
-
-   if (ctx->prog_type == TGSI_PROCESSOR_FRAGMENT && ctx->num_in_clip_dist) {
-      if (ctx->key->prev_stage_num_clip_out) {
-         emit_hdrf(ctx, "in float gl_ClipDistance[%d];\n", ctx->key->prev_stage_num_clip_out);
-      }
-      if (ctx->key->prev_stage_num_cull_out) {
-         emit_hdrf(ctx, "in float gl_CullDistance[%d];\n", ctx->key->prev_stage_num_cull_out);
-      }
-   }
-
-   if (ctx->prog_type == TGSI_PROCESSOR_TESS_CTRL || ctx->prog_type == TGSI_PROCESSOR_TESS_EVAL) {
-      if (ctx->num_in_clip_dist || ctx->key->prev_stage_pervertex_out) {
-         int clip_dist, cull_dist;
-         char clip_var[64] = {}, cull_var[64] = {};
-
-         clip_dist = ctx->key->prev_stage_num_clip_out ? ctx->key->prev_stage_num_clip_out : ctx->num_in_clip_dist;
-         cull_dist = ctx->key->prev_stage_num_cull_out;
-
-         if (clip_dist)
-            snprintf(clip_var, 64, "float gl_ClipDistance[%d];\n", clip_dist);
-         if (cull_dist)
-            snprintf(cull_var, 64, "float gl_CullDistance[%d];\n", cull_dist);
-
-         emit_hdrf(ctx, "in gl_PerVertex {\n vec4 gl_Position;\n float gl_PointSize; \n %s%s} gl_in[];\n", clip_var, cull_var);
-      }
-      if (ctx->num_clip_dist) {
-         emit_hdrf(ctx, "out gl_PerVertex {\n vec4 gl_Position;\n float gl_PointSize;\n float gl_ClipDistance[%d];\n} gl_out[];\n", ctx->num_clip_dist ? ctx->num_clip_dist : 8);
-         emit_hdr(ctx, "vec4 clip_dist_temp[2];\n");
-      }
-   }
-
-   if (ctx->so) {
-      char outtype[6] = {0};
-      for (i = 0; i < ctx->so->num_outputs; i++) {
-         if (!ctx->write_so_outputs[i])
-            continue;
-         if (ctx->so->output[i].num_components == 1)
-            snprintf(outtype, 6, "float");
-         else
-            snprintf(outtype, 6, "vec%d", ctx->so->output[i].num_components);
-	 if (ctx->prog_type == TGSI_PROCESSOR_TESS_CTRL)
-            emit_hdrf(ctx, "out %s tfout%d[];\n", outtype, i);
-         else if (ctx->so->output[i].stream && ctx->prog_type == TGSI_PROCESSOR_GEOMETRY)
-            emit_hdrf(ctx, "layout (stream=%d) out %s tfout%d;\n", ctx->so->output[i].stream, outtype, i);
-         else
-            emit_hdrf(ctx, "out %s tfout%d;\n", outtype, i);
-      }
-   }
    for (i = 0; i < ctx->num_temp_ranges; i++) {
       emit_hdrf(ctx, "vec4 temp%d[%d];\n", ctx->temp_ranges[i].first, ctx->temp_ranges[i].last - ctx->temp_ranges[i].first + 1);
    }
@@ -4595,21 +4276,19 @@ static void emit_ios(struct dump_ctx *ctx)
       emit_hdrf(ctx, "uniform uvec4 %sconst0[%d];\n", cname, ctx->num_consts);
    }
 
-   if (ctx->key->color_two_side) {
-      if (ctx->color_in_mask & 1)
-         emit_hdr(ctx, "vec4 realcolor0;\n");
-      if (ctx->color_in_mask & 2)
-         emit_hdr(ctx, "vec4 realcolor1;\n");
-   }
-   if (ctx->num_ubo) {
+   if (ctx->ubo_used_mask) {
       const char *cname = tgsi_proc_to_prefix(ctx->prog_type);
 
       if (ctx->info.dimension_indirect_files & (1 << TGSI_FILE_CONSTANT)) {
          require_glsl_ver(ctx, 150);
-         emit_hdrf(ctx, "uniform %subo { vec4 ubocontents[%d]; } %suboarr[%d];\n", cname, ctx->ubo_sizes[0], cname, ctx->num_ubo);
+         int first = ffs(ctx->ubo_used_mask) - 1;
+         unsigned num_ubo = util_bitcount(ctx->ubo_used_mask);
+         emit_hdrf(ctx, "uniform %subo { vec4 ubocontents[%d]; } %suboarr[%d];\n", cname, ctx->ubo_sizes[first], cname, num_ubo);
       } else {
-         for (i = 0; i < ctx->num_ubo; i++) {
-            emit_hdrf(ctx, "uniform %subo%d { vec4 %subo%dcontents[%d]; };\n", cname, ctx->ubo_idx[i], cname, ctx->ubo_idx[i], ctx->ubo_sizes[i]);
+         unsigned mask = ctx->ubo_used_mask;
+         while (mask) {
+            uint32_t i = u_bit_scan(&mask);
+            emit_hdrf(ctx, "uniform %subo%d { vec4 %subo%dcontents[%d]; };\n", cname, i, cname, i, ctx->ubo_sizes[i]);
          }
       }
    }
@@ -4621,7 +4300,7 @@ static void emit_ios(struct dump_ctx *ctx)
          emit_sampler_decl(ctx, first, range, ctx->samplers + first);
       }
    } else {
-      nsamp = util_last_bit(ctx->samplers_used);
+      uint nsamp = util_last_bit(ctx->samplers_used);
       for (i = 0; i < nsamp; i++) {
 
          if ((ctx->samplers_used & (1 << i)) == 0)
@@ -4664,12 +4343,537 @@ static void emit_ios(struct dump_ctx *ctx)
       uint32_t mask = ctx->ssbo_used_mask;
       while (mask) {
          uint32_t id = u_bit_scan(&mask);
-         sname = tgsi_proc_to_prefix(ctx->prog_type);
          enum vrend_type_qualifier type = (ctx->ssbo_integer_mask & (1 << id)) ? INT : UINT;
          emit_hdrf(ctx, "layout (binding = %d, std430) buffer %sssbo%d { %s %sssbocontents%d[]; };\n", id, sname, id,
                   get_string(type), sname, id);
       }
    }
+
+}
+
+static void emit_ios_streamout(struct dump_ctx *ctx)
+{
+   if (ctx->so) {
+      char outtype[6] = {0};
+      for (uint i = 0; i < ctx->so->num_outputs; i++) {
+         if (!ctx->write_so_outputs[i])
+            continue;
+         if (ctx->so->output[i].num_components == 1)
+            snprintf(outtype, 6, "float");
+         else
+            snprintf(outtype, 6, "vec%d", ctx->so->output[i].num_components);
+	 if (ctx->prog_type == TGSI_PROCESSOR_TESS_CTRL)
+            emit_hdrf(ctx, "out %s tfout%d[];\n", outtype, i);
+         else if (ctx->so->output[i].stream && ctx->prog_type == TGSI_PROCESSOR_GEOMETRY)
+            emit_hdrf(ctx, "layout (stream=%d) out %s tfout%d;\n", ctx->so->output[i].stream, outtype, i);
+         else
+            emit_hdrf(ctx, "out %s tfout%d;\n", outtype, i);
+      }
+   }
+}
+
+static inline void emit_winsys_correction(struct dump_ctx *ctx)
+{
+   emit_hdr(ctx, "uniform float winsys_adjust_y;\n");
+}
+
+static void emit_ios_vs(struct dump_ctx *ctx)
+{
+   uint32_t i;
+   char postfix[8];
+   const char *prefix = "", *auxprefix = "";
+   bool fcolor_emitted[2], bcolor_emitted[2];
+
+   ctx->num_interps = 0;
+
+   if (ctx->key->color_two_side) {
+      fcolor_emitted[0] = fcolor_emitted[1] = false;
+      bcolor_emitted[0] = bcolor_emitted[1] = false;
+   }
+
+   for (i = 0; i < ctx->num_inputs; i++) {
+      if (!ctx->inputs[i].glsl_predefined_no_emit) {
+         if (ctx->cfg->use_explicit_locations) {
+            emit_hdrf(ctx, "layout(location=%d) ", ctx->inputs[i].first);
+         }
+         prefix = "";
+         auxprefix = "";
+         postfix[0] = 0;
+         emit_hdrf(ctx, "%s%sin vec4 %s%s;\n", prefix, auxprefix, ctx->inputs[i].glsl_name, postfix);
+      }
+   }
+
+   if (ctx_indirect_outputs(ctx)) {
+      const char *name_prefix = get_stage_output_name_prefix(ctx->prog_type);
+      if (ctx->generic_output_range.used) {
+         emit_hdrf(ctx, "out block { vec4 %s%d[%d]; } oblk;\n", name_prefix, ctx->generic_output_range.first, ctx->generic_output_range.last - ctx->generic_output_range.first + 1);
+      }
+   }
+
+   for (i = 0; i < ctx->num_outputs; i++) {
+      if (ctx->key->color_two_side && ctx->outputs[i].sid < 2) {
+         if (ctx->outputs[i].name == TGSI_SEMANTIC_COLOR)
+            fcolor_emitted[ctx->outputs[i].sid] = true;
+         if (ctx->outputs[i].name == TGSI_SEMANTIC_BCOLOR)
+            bcolor_emitted[ctx->outputs[i].sid] = true;
+      }
+
+      if (!ctx->outputs[i].glsl_predefined_no_emit) {
+         if (ctx->outputs[i].name == TGSI_SEMANTIC_GENERIC ||
+             ctx->outputs[i].name == TGSI_SEMANTIC_COLOR ||
+             ctx->outputs[i].name == TGSI_SEMANTIC_BCOLOR) {
+            ctx->num_interps++;
+            prefix = INTERP_PREFIX;
+         } else
+            prefix = "";
+
+         /* ugly leave spaces to patch interp in later */
+         emit_hdrf(ctx, "%s%s%s%s vec4 %s;\n",
+                   prefix,
+                   ctx->outputs[i].precise ? "precise " : "",
+                   ctx->outputs[i].invariant ? "invariant " : "",
+                   ctx->outputs[i].fbfetch_used ? "inout" : "out",
+                   ctx->outputs[i].glsl_name);
+      } else if (ctx->outputs[i].invariant || ctx->outputs[i].precise) {
+         emit_hdrf(ctx, "%s%s;\n",
+                   ctx->outputs[i].precise ? "precise " :
+                                             (ctx->outputs[i].invariant ? "invariant " : ""),
+                   ctx->outputs[i].glsl_name);
+      }
+   }
+
+   if (ctx->key->color_two_side) {
+      for (i = 0; i < 2; i++) {
+         if (fcolor_emitted[i] && !bcolor_emitted[i]) {
+            emit_hdrf(ctx, "%sout vec4 ex_bc%d;\n", INTERP_PREFIX, i);
+         }
+         if (bcolor_emitted[i] && !fcolor_emitted[i]) {
+            emit_hdrf(ctx, "%sout vec4 ex_c%d;\n", INTERP_PREFIX, i);
+         }
+      }
+   }
+
+   emit_winsys_correction(ctx);
+
+   if (ctx->has_clipvertex) {
+      emit_hdrf(ctx, "%svec4 clipv_tmp;\n", ctx->has_clipvertex_so ? "out " : "");
+   }
+   if (ctx->num_clip_dist || ctx->key->clip_plane_enable) {
+      bool has_prop = (ctx->num_clip_dist_prop + ctx->num_cull_dist_prop) > 0;
+      int num_clip_dists = ctx->num_clip_dist ? ctx->num_clip_dist : 8;
+      int num_cull_dists = 0;
+      char cull_buf[64] = { 0 };
+      char clip_buf[64] = { 0 };
+      if (has_prop) {
+         num_clip_dists = ctx->num_clip_dist_prop;
+         num_cull_dists = ctx->num_cull_dist_prop;
+         if (num_clip_dists)
+            snprintf(clip_buf, 64, "out float gl_ClipDistance[%d];\n", num_clip_dists);
+         if (num_cull_dists)
+            snprintf(cull_buf, 64, "out float gl_CullDistance[%d];\n", num_cull_dists);
+      } else
+         snprintf(clip_buf, 64, "out float gl_ClipDistance[%d];\n", num_clip_dists);
+      if (ctx->key->clip_plane_enable) {
+         emit_hdr(ctx, "uniform vec4 clipp[8];\n");
+      }
+      if (ctx->key->gs_present || ctx->key->tes_present) {
+         ctx->vs_has_pervertex = true;
+         emit_hdrf(ctx, "out gl_PerVertex {\n vec4 gl_Position;\n float gl_PointSize;\n%s%s};\n", clip_buf, cull_buf);
+      } else {
+         emit_hdrf(ctx, "%s%s", clip_buf, cull_buf);
+      }
+      emit_hdr(ctx, "vec4 clip_dist_temp[2];\n");
+   }
+}
+
+
+static void emit_ios_fs(struct dump_ctx *ctx)
+{
+   uint32_t i;
+   const char *prefix = "", *auxprefix = "";
+
+   if (fs_emit_layout(ctx)) {
+      bool upper_left = !(ctx->fs_coord_origin ^ ctx->key->invert_fs_origin);
+      char comma = (upper_left && ctx->fs_pixel_center) ? ',' : ' ';
+
+      emit_hdrf(ctx, "layout(%s%c%s) in vec4 gl_FragCoord;\n",
+                upper_left ? "origin_upper_left" : "",
+                comma,
+                ctx->fs_pixel_center ? "pixel_center_integer" : "");
+   }
+   if (ctx->early_depth_stencil) {
+      emit_hdr(ctx, "layout(early_fragment_tests) in;\n");
+   }
+
+   if (ctx_indirect_inputs(ctx) && ctx->generic_input_range.used) {
+      const char *name_prefix = get_stage_input_name_prefix(ctx, ctx->prog_type);
+      int size = ctx->generic_input_range.last - ctx->generic_input_range.first + 1;
+      if (size < ctx->key->num_indirect_generic_inputs)
+         ctx->key->num_indirect_generic_inputs = size;  // This is wrong but needed for debugging
+      emit_hdrf(ctx, "in block { vec4 %s%d[%d]; } blk;\n", name_prefix, ctx->generic_input_range.first, size);
+   }
+
+   for (i = 0; i < ctx->num_inputs; i++) {
+      if (!ctx->inputs[i].glsl_predefined_no_emit) {
+         prefix = "";
+         auxprefix = "";
+
+         if (ctx->inputs[i].name == TGSI_SEMANTIC_GENERIC ||
+              ctx->inputs[i].name == TGSI_SEMANTIC_COLOR ||
+              ctx->inputs[i].name == TGSI_SEMANTIC_BCOLOR) {
+            prefix = get_interp_string(ctx->cfg, ctx->inputs[i].interpolate, ctx->key->flatshade);
+            if (!prefix)
+               prefix = "";
+            auxprefix = get_aux_string(ctx->inputs[i].location);
+            ctx->num_interps++;
+         }
+         emit_hdrf(ctx, "%s%sin vec4 %s;\n", prefix, auxprefix, ctx->inputs[i].glsl_name);
+      }
+
+      if (ctx->cfg->use_gles && !ctx->key->winsys_adjust_y_emitted &&
+          (ctx->key->coord_replace & (1 << ctx->inputs[i].sid))) {
+         ctx->key->winsys_adjust_y_emitted = true;
+         emit_hdr(ctx, "uniform float winsys_adjust_y;\n");
+      }
+   }
+
+   if (ctx->key->color_two_side) {
+      if (ctx->color_in_mask & 1)
+         emit_hdr(ctx, "vec4 realcolor0;\n");
+      if (ctx->color_in_mask & 2)
+         emit_hdr(ctx, "vec4 realcolor1;\n");
+   }
+
+   if (ctx->write_all_cbufs) {
+      for (i = 0; i < (uint32_t)ctx->cfg->max_draw_buffers; i++) {
+         if (ctx->cfg->use_gles)
+            emit_hdrf(ctx, "layout (location=%d) out vec4 fsout_c%d;\n", i, i);
+         else
+            emit_hdrf(ctx, "out vec4 fsout_c%d;\n", i);
+      }
+   } else {
+      for (i = 0; i < ctx->num_outputs; i++) {
+
+         if (!ctx->outputs[i].glsl_predefined_no_emit) {
+            prefix = "";
+
+            /* ugly leave spaces to patch interp in later */
+            emit_hdrf(ctx, "%s%s%s%s vec4 %s;\n",
+                      prefix,
+                      ctx->outputs[i].precise ? "precise " : "",
+                      ctx->outputs[i].invariant ? "invariant " : "",
+                      ctx->outputs[i].fbfetch_used ? "inout" : "out",
+                      ctx->outputs[i].glsl_name);
+         } else if (ctx->outputs[i].invariant || ctx->outputs[i].precise) {
+            emit_hdrf(ctx, "%s%s;\n",
+                      ctx->outputs[i].precise ? "precise " :
+                      (ctx->outputs[i].invariant ? "invariant " : ""),
+                      ctx->outputs[i].glsl_name);
+         }
+      }
+   }
+
+   if (ctx->num_in_clip_dist) {
+      if (ctx->key->prev_stage_num_clip_out) {
+         emit_hdrf(ctx, "in float gl_ClipDistance[%d];\n", ctx->key->prev_stage_num_clip_out);
+      }
+      if (ctx->key->prev_stage_num_cull_out) {
+         emit_hdrf(ctx, "in float gl_CullDistance[%d];\n", ctx->key->prev_stage_num_cull_out);
+      }
+   }
+}
+
+static void emit_ios_geom(struct dump_ctx *ctx)
+{
+   uint32_t i;
+   char invocbuf[25];
+
+   if (ctx->gs_num_invocations)
+      snprintf(invocbuf, 25, ", invocations = %d", ctx->gs_num_invocations);
+
+   emit_hdrf(ctx, "layout(%s%s) in;\n", prim_to_name(ctx->gs_in_prim),
+             ctx->gs_num_invocations > 1 ? invocbuf : "");
+   emit_hdrf(ctx, "layout(%s, max_vertices = %d) out;\n", prim_to_name(ctx->gs_out_prim), ctx->gs_max_out_verts);
+
+
+   for (i = 0; i < ctx->num_inputs; i++) {
+      if (!ctx->inputs[i].glsl_predefined_no_emit)
+         emit_hdrf(ctx, "in vec4 %s[%d];\n", ctx->inputs[i].glsl_name, gs_input_prim_to_size(ctx->gs_in_prim));
+   }
+
+   for (i = 0; i < ctx->num_outputs; i++) {
+
+      if (!ctx->outputs[i].glsl_predefined_no_emit) {
+         const char *prefix = "";
+         if (ctx->outputs[i].name == TGSI_SEMANTIC_GENERIC ||
+             ctx->outputs[i].name == TGSI_SEMANTIC_COLOR ||
+             ctx->outputs[i].name == TGSI_SEMANTIC_BCOLOR) {
+            ctx->num_interps++;
+            prefix = INTERP_PREFIX;
+         }
+
+         /* ugly leave spaces to patch interp in later */
+         if (ctx->outputs[i].stream)
+            emit_hdrf(ctx, "layout (stream = %d) %s%s%sout vec4 %s;\n", ctx->outputs[i].stream, prefix,
+                      ctx->outputs[i].precise ? "precise " : "",
+                      ctx->outputs[i].invariant ? "invariant " : "",
+                      ctx->outputs[i].glsl_name);
+         else
+            emit_hdrf(ctx, "%s%s%s%s vec4 %s;\n",
+                      prefix,
+                      ctx->outputs[i].precise ? "precise " : "",
+                      ctx->outputs[i].invariant ? "invariant " : "",
+                      ctx->outputs[i].fbfetch_used ? "inout" : "out",
+                      ctx->outputs[i].glsl_name);
+      } else if (ctx->outputs[i].invariant || ctx->outputs[i].precise) {
+         emit_hdrf(ctx, "%s%s;\n",
+                   ctx->outputs[i].precise ? "precise " :
+                   (ctx->outputs[i].invariant ? "invariant " : ""),
+                   ctx->outputs[i].glsl_name);
+      }
+   }
+
+   emit_winsys_correction(ctx);
+
+   if (ctx->num_in_clip_dist || ctx->key->clip_plane_enable || ctx->key->prev_stage_pervertex_out) {
+      int clip_dist, cull_dist;
+      char clip_var[64] = {}, cull_var[64] = {};
+
+      clip_dist = ctx->key->prev_stage_num_clip_out ? ctx->key->prev_stage_num_clip_out : ctx->num_in_clip_dist;
+      cull_dist = ctx->key->prev_stage_num_cull_out;
+
+      if (clip_dist)
+         snprintf(clip_var, 64, "float gl_ClipDistance[%d];\n", clip_dist);
+      if (cull_dist)
+         snprintf(cull_var, 64, "float gl_CullDistance[%d];\n", cull_dist);
+
+      emit_hdrf(ctx, "in gl_PerVertex {\n vec4 gl_Position;\n float gl_PointSize; \n %s%s\n} gl_in[];\n", clip_var, cull_var);
+   }
+   if (ctx->num_clip_dist) {
+      bool has_prop = (ctx->num_clip_dist_prop + ctx->num_cull_dist_prop) > 0;
+      int num_clip_dists = ctx->num_clip_dist ? ctx->num_clip_dist : 8;
+      int num_cull_dists = 0;
+      char cull_buf[64] = { 0 };
+      char clip_buf[64] = { 0 };
+      if (has_prop) {
+         num_clip_dists = ctx->num_clip_dist_prop;
+         num_cull_dists = ctx->num_cull_dist_prop;
+         if (num_clip_dists)
+            snprintf(clip_buf, 64, "out float gl_ClipDistance[%d];\n", num_clip_dists);
+         if (num_cull_dists)
+            snprintf(cull_buf, 64, "out float gl_CullDistance[%d];\n", num_cull_dists);
+      } else
+         snprintf(clip_buf, 64, "out float gl_ClipDistance[%d];\n", num_clip_dists);
+      emit_hdrf(ctx, "%s%s\n", clip_buf, cull_buf);
+      emit_hdrf(ctx, "vec4 clip_dist_temp[2];\n");
+   }
+}
+
+
+static void emit_ios_tcs(struct dump_ctx *ctx)
+{
+   uint32_t i;
+
+   if (ctx_indirect_inputs(ctx)) {
+      const char *name_prefix = get_stage_input_name_prefix(ctx, ctx->prog_type);
+
+      if (ctx->generic_input_range.used) {
+         int size = ctx->generic_input_range.last - ctx->generic_input_range.first + 1;
+         if (size < ctx->key->num_indirect_generic_inputs)
+            size = ctx->key->num_indirect_generic_inputs;
+         emit_hdrf(ctx, "in block { vec4 %s%d[%d]; } blk[];\n", name_prefix, ctx->generic_input_range.first, size);
+      }
+   }
+
+   for (i = 0; i < ctx->num_inputs; i++) {
+      if (!ctx->inputs[i].glsl_predefined_no_emit) {
+         const char *postfix =  (ctx->inputs[i].name != TGSI_SEMANTIC_PATCH) ? "[]" : "";
+         emit_hdrf(ctx, "in vec4 %s%s;\n", ctx->inputs[i].glsl_name, postfix);
+      }
+   }
+
+   emit_hdrf(ctx, "layout(vertices = %d) out;\n", ctx->tcs_vertices_out);
+
+   if (ctx_indirect_outputs(ctx)) {
+      const char *name_prefix = get_stage_output_name_prefix(ctx->prog_type);
+      if (ctx->generic_output_range.used) {
+         emit_hdrf(ctx, "out block { vec4 %s%d[%d]; } oblk[];\n", name_prefix, ctx->generic_output_range.first, ctx->generic_output_range.last - ctx->generic_output_range.first + 1);
+      }
+      if (ctx->patch_output_range.used) {
+         emit_hdrf(ctx, "patch out vec4 %sp%d[%d];\n", name_prefix, ctx->patch_output_range.first, ctx->patch_output_range.last - ctx->patch_output_range.first + 1);
+      }
+   }
+
+   for (i = 0; i < ctx->num_outputs; i++) {
+      if (!ctx->outputs[i].glsl_predefined_no_emit) {
+         /* ugly leave spaces to patch interp in later */
+         if (ctx->outputs[i].name == TGSI_SEMANTIC_PATCH)
+            emit_hdrf(ctx, "patch out vec4 %s;\n", ctx->outputs[i].glsl_name);
+         else
+            emit_hdrf(ctx, "out vec4 %s[];\n", ctx->outputs[i].glsl_name);
+      } else if (ctx->outputs[i].invariant || ctx->outputs[i].precise) {
+         emit_hdrf(ctx, "%s%s;\n",
+                   ctx->outputs[i].precise ? "precise " :
+                   (ctx->outputs[i].invariant ? "invariant " : ""),
+                   ctx->outputs[i].glsl_name);
+      }
+   }
+
+   if (ctx->num_in_clip_dist || ctx->key->prev_stage_pervertex_out) {
+      int clip_dist, cull_dist;
+      char clip_var[64] = "", cull_var[64] = "";
+
+      clip_dist = ctx->key->prev_stage_num_clip_out ? ctx->key->prev_stage_num_clip_out : ctx->num_in_clip_dist;
+      cull_dist = ctx->key->prev_stage_num_cull_out;
+
+      if (clip_dist)
+         snprintf(clip_var, 64, "float gl_ClipDistance[%d];\n", clip_dist);
+      if (cull_dist)
+         snprintf(cull_var, 64, "float gl_CullDistance[%d];\n", cull_dist);
+
+      emit_hdrf(ctx, "in gl_PerVertex {\n vec4 gl_Position;\n float gl_PointSize; \n %s%s} gl_in[];\n", clip_var, cull_var);
+   }
+   if (ctx->num_clip_dist) {
+      emit_hdrf(ctx, "out gl_PerVertex {\n vec4 gl_Position;\n float gl_PointSize;\n float gl_ClipDistance[%d];\n} gl_out[];\n", ctx->num_clip_dist ? ctx->num_clip_dist : 8);
+      emit_hdr(ctx, "vec4 clip_dist_temp[2];\n");
+   }
+}
+
+static void emit_ios_tes(struct dump_ctx *ctx)
+{
+   uint32_t i;
+
+   if (ctx_indirect_inputs(ctx)) {
+      const char *name_prefix = get_stage_input_name_prefix(ctx, ctx->prog_type);
+      if (ctx->patch_input_range.used) {
+         int size = ctx->patch_input_range.last - ctx->patch_input_range.first + 1;
+         if (size < ctx->key->num_indirect_patch_inputs)
+            size = ctx->key->num_indirect_patch_inputs;
+         emit_hdrf(ctx, "patch in vec4 %sp%d[%d];\n", name_prefix, ctx->patch_input_range.first, size);
+      }
+
+      if (ctx->generic_input_range.used) {
+         int size = ctx->generic_input_range.last - ctx->generic_input_range.first + 1;
+         if (size < ctx->key->num_indirect_generic_inputs)
+            size = ctx->key->num_indirect_generic_inputs;
+         emit_hdrf(ctx, "in block { vec4 %s%d[%d]; } blk[];\n", name_prefix, ctx->generic_input_range.first, size);
+      }
+   }
+
+   for (i = 0; i < ctx->num_inputs; i++) {
+      if (!ctx->inputs[i].glsl_predefined_no_emit) {
+         const char *prefix = "";
+         const char *postfix = "";
+         if (ctx->inputs[i].name == TGSI_SEMANTIC_PATCH)
+            prefix = "patch ";
+         else
+            postfix = "[]";
+         emit_hdrf(ctx, "%sin vec4 %s%s;\n", prefix, ctx->inputs[i].glsl_name, postfix);
+      }
+   }
+
+   emit_hdrf(ctx, "layout(%s, %s, %s%s) in;\n",
+             prim_to_tes_name(ctx->tes_prim_mode),
+             get_spacing_string(ctx->tes_spacing),
+             ctx->tes_vertex_order ? "cw" : "ccw",
+             ctx->tes_point_mode ? ", point_mode" : "");
+
+   for (i = 0; i < ctx->num_outputs; i++) {
+      if (!ctx->outputs[i].glsl_predefined_no_emit) {
+         const char *prefix = "";
+         if (ctx->outputs[i].name == TGSI_SEMANTIC_GENERIC ||
+             ctx->outputs[i].name == TGSI_SEMANTIC_COLOR ||
+             ctx->outputs[i].name == TGSI_SEMANTIC_BCOLOR) {
+            ctx->num_interps++;
+            prefix = INTERP_PREFIX;
+         }
+
+         /* ugly leave spaces to patch interp in later */
+         emit_hdrf(ctx, "%s%s%s%s vec4 %s;\n",
+                   prefix,
+                   ctx->outputs[i].precise ? "precise " : "",
+                   ctx->outputs[i].invariant ? "invariant " : "",
+                   ctx->outputs[i].fbfetch_used ? "inout" : "out",
+                   ctx->outputs[i].glsl_name);
+      } else if (ctx->outputs[i].invariant || ctx->outputs[i].precise) {
+         emit_hdrf(ctx, "%s%s;\n",
+                   ctx->outputs[i].precise ? "precise " :
+                    (ctx->outputs[i].invariant ? "invariant " : ""),
+                   ctx->outputs[i].glsl_name);
+      }
+   }
+
+   emit_winsys_correction(ctx);
+
+   if (ctx->num_in_clip_dist || ctx->key->prev_stage_pervertex_out) {
+      int clip_dist, cull_dist;
+      char clip_var[64] = "", cull_var[64] = "";
+
+      clip_dist = ctx->key->prev_stage_num_clip_out ? ctx->key->prev_stage_num_clip_out : ctx->num_in_clip_dist;
+      cull_dist = ctx->key->prev_stage_num_cull_out;
+
+      if (clip_dist)
+         snprintf(clip_var, 64, "float gl_ClipDistance[%d];\n", clip_dist);
+      if (cull_dist)
+         snprintf(cull_var, 64, "float gl_CullDistance[%d];\n", cull_dist);
+
+      emit_hdrf(ctx, "in gl_PerVertex {\n vec4 gl_Position;\n float gl_PointSize; \n %s%s} gl_in[];\n", clip_var, cull_var);
+   }
+   if (ctx->num_clip_dist) {
+      emit_hdrf(ctx, "out gl_PerVertex {\n vec4 gl_Position;\n float gl_PointSize;\n float gl_ClipDistance[%d];\n} gl_out[];\n", ctx->num_clip_dist ? ctx->num_clip_dist : 8);
+      emit_hdr(ctx, "vec4 clip_dist_temp[2];\n");
+   }
+}
+
+
+static void emit_ios_cs(struct dump_ctx *ctx)
+{
+   emit_hdrf(ctx, "layout (local_size_x = %d, local_size_y = %d, local_size_z = %d) in;\n",
+             ctx->local_cs_block_size[0], ctx->local_cs_block_size[1], ctx->local_cs_block_size[2]);
+
+   if (ctx->req_local_mem) {
+      enum vrend_type_qualifier type = ctx->integer_memory ? INT : UINT;
+      emit_hdrf(ctx, "shared %s values[%d];\n", get_string(type), ctx->req_local_mem / 4);
+   }
+}
+
+static void emit_ios(struct dump_ctx *ctx)
+{
+   ctx->num_interps = 0;
+
+   if (ctx->so && ctx->so->num_outputs >= PIPE_MAX_SO_OUTPUTS) {
+      fprintf(stderr, "Num outputs exceeded, max is %u\n", PIPE_MAX_SO_OUTPUTS);
+      set_hdr_error(ctx);
+      return;
+   }
+
+   switch (ctx->prog_type) {
+   case TGSI_PROCESSOR_VERTEX:
+      emit_ios_vs(ctx);
+      break;
+   case TGSI_PROCESSOR_FRAGMENT:
+      emit_ios_fs(ctx);
+      break;
+   case TGSI_PROCESSOR_GEOMETRY:
+      emit_ios_geom(ctx);
+      break;
+   case TGSI_PROCESSOR_TESS_CTRL:
+      emit_ios_tcs(ctx);
+      break;
+   case TGSI_PROCESSOR_TESS_EVAL:
+      emit_ios_tes(ctx);
+      break;
+   case TGSI_PROCESSOR_COMPUTE:
+      emit_ios_cs(ctx);
+      break;
+   default:
+      fprintf(stderr, "Unknown shader processor %d\n", ctx->prog_type);
+      set_hdr_error(ctx);
+      return;
+   }
+
+   emit_ios_streamout(ctx);
+   emit_ios_common(ctx);
 
    if (ctx->prog_type == TGSI_PROCESSOR_FRAGMENT &&
        ctx->key->pstipple_tex == true) {
@@ -4847,8 +5051,7 @@ char *vrend_convert_shader(struct vrend_context *rctx,
    sinfo->samplers_used_mask = ctx.samplers_used;
    sinfo->images_used_mask = ctx.images_used_mask;
    sinfo->num_consts = ctx.num_consts;
-   sinfo->num_ubos = ctx.num_ubo;
-   memcpy(sinfo->ubo_idx, ctx.ubo_idx, ctx.num_ubo * sizeof(*ctx.ubo_idx));
+   sinfo->ubo_used_mask = ctx.ubo_used_mask;
 
    sinfo->ssbo_used_mask = ctx.ssbo_used_mask;
 

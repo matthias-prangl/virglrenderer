@@ -2,17 +2,8 @@
 
 trap "{ rm -f $TMP_TEST_FILE; }" EXIT
 
-CI_PATH=$(dirname $(readlink -f "$0"))
-
-VIRGL_PATH="/virglrenderer"
-if [ ! -d "$VIRGL_PATH" ]; then
-   VIRGL_PATH="${CI_PATH}/.."
-fi
-
-CTS_PATH="/VK-GL-CTS"
-if [ ! -d "$CTS_PATH" ]; then
-   CTS_PATH="${CI_PATH}/../../VK-GL-CTS"
-fi
+# Setup paths and import util functions
+. $(dirname $(readlink -f "$0"))/util.sh
 
 TESTS=""
 BACKENDS=""
@@ -46,9 +37,11 @@ parse_input()
    	-t|--test)
          TEST_NAME="$2"
          shift
-         TMP_TEST_FILE=$(mktemp /tmp/deqp_test.XXXXXX)
-         echo "$TEST_NAME" > "$TMP_TEST_FILE"
-         TESTS="$TESTS custom"
+         if [ -z "$TMP_TEST_FILE" ]; then
+            TMP_TEST_FILE=$(mktemp /tmp/deqp_test.XXXXXX)
+            TESTS="$TESTS custom"
+         fi
+         echo "$TEST_NAME" >> "$TMP_TEST_FILE"
          ;;
 
    	-v|--vtest)
