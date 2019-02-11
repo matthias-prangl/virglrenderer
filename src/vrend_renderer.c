@@ -146,6 +146,7 @@ enum features_id
    feat_txqs,
    feat_ubo,
    feat_viewport_array,
+   feat_angle_robustness,
    feat_last,
 };
 
@@ -220,6 +221,7 @@ static const  struct {
    FEAT(txqs, 45, UNAVAIL,  "GL_ARB_shader_texture_image_samples" ),
    FEAT(ubo, 31, 30,  "GL_ARB_uniform_buffer_object" ),
    FEAT(viewport_array, 41, UNAVAIL,  "GL_ARB_viewport_array" ),
+   FEAT(angle_robustness, UNAVAIL, UNAVAIL,  "GL_EXT_robustness" ),
 };
 
 struct global_renderer_state {
@@ -5300,7 +5302,8 @@ int vrend_renderer_init(struct vrend_if_cbs *cbs, uint32_t flags)
    glGetIntegerv(GL_MAX_DRAW_BUFFERS, (GLint *) &vrend_state.max_draw_buffers);
 
    if (!has_feature(feat_arb_robustness) &&
-       !has_feature(feat_gles_khr_robustness)) {
+       !has_feature(feat_gles_khr_robustness) &&
+       !has_feature(feat_angle_robustness)) {
       fprintf(stderr,"WARNING: running without ARB/KHR robustness in place may crash\n");
    }
 
@@ -6602,6 +6605,8 @@ static int vrend_transfer_send_readpixels(struct vrend_context *ctx,
       glReadnPixelsARB(info->box->x, y1, info->box->width, info->box->height, format, type, send_size, data);
    else if (has_feature(feat_gles_khr_robustness))
       glReadnPixelsKHR(info->box->x, y1, info->box->width, info->box->height, format, type, send_size, data);
+   else if (has_feature(feat_angle_robustness))
+      glReadnPixelsEXT(info->box->x, y1, info->box->width, info->box->height, format, type, send_size, data);
    else
       glReadPixels(info->box->x, y1, info->box->width, info->box->height, format, type, data);
 
@@ -8590,6 +8595,8 @@ void *vrend_renderer_get_cursor_contents(uint32_t res_handle, uint32_t *width, u
          glReadnPixelsARB(0, 0, *width, *height, format, type, size, data);
       } else if (has_feature(feat_gles_khr_robustness)) {
          glReadnPixelsKHR(0, 0, *width, *height, format, type, size, data);
+      } else if (has_feature(feat_angle_robustness)) {
+         glReadnPixelsEXT(0, 0, *width, *height, format, type, size, data);
       } else {
          glReadPixels(0, 0, *width, *height, format, type, data);
       }
