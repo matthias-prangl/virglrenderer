@@ -28,6 +28,7 @@
 #include "pipe/p_state.h"
 #include "pipe/p_shader_tokens.h"
 
+#include "vrend_strbuf.h"
 /* need to store patching info for interpolation */
 struct vrend_interp_info {
    int semantic_name;
@@ -41,11 +42,22 @@ struct vrend_array {
    int array_size;
 };
 
+struct vrend_layout_info {
+   unsigned name;
+   int sid;
+   int location;
+   int array_id;
+   int usage_mask;
+};
+
 struct vrend_shader_info {
    uint32_t samplers_used_mask;
    uint32_t images_used_mask;
    uint32_t ubo_used_mask;
    uint32_t ssbo_used_mask;
+   uint32_t num_generic_and_patch_outputs;
+   bool guest_sent_io_arrays;
+   struct vrend_layout_info generic_outputs_layout[64];
    int num_consts;
    int num_inputs;
    int num_interps;
@@ -93,6 +105,10 @@ struct vrend_shader_key {
    bool tes_present;
    bool flatshade;
    bool prev_stage_pervertex_out;
+   bool guest_sent_io_arrays;
+   uint32_t num_prev_generic_and_patch_outputs;
+   struct vrend_layout_info prev_stage_generic_and_patch_outputs_layout[64];
+
    uint8_t prev_stage_num_clip_out;
    uint8_t prev_stage_num_cull_out;
    float alpha_ref_val;
@@ -109,23 +125,29 @@ struct vrend_shader_cfg {
    bool use_gles;
    bool use_core_profile;
    bool use_explicit_locations;
+   bool has_arrays_of_arrays;
 };
 
 struct vrend_context;
 
+#define SHADER_MAX_STRINGS 3
+#define SHADER_STRING_VER_EXT 0
+#define SHADER_STRING_HDR 1
+
 bool vrend_patch_vertex_shader_interpolants(struct vrend_context *rctx,
                                             struct vrend_shader_cfg *cfg,
-                                            char *program,
+                                            struct vrend_strarray *shader,
                                             struct vrend_shader_info *vs_info,
                                             struct vrend_shader_info *fs_info,
                                             const char *oprefix, bool flatshade);
 
-char *vrend_convert_shader(struct  vrend_context *rctx,
-                           struct vrend_shader_cfg *cfg,
-                           const struct tgsi_token *tokens,
-                           uint32_t req_local_mem,
-                           struct vrend_shader_key *key,
-                           struct vrend_shader_info *sinfo);
+bool vrend_convert_shader(struct  vrend_context *rctx,
+                          struct vrend_shader_cfg *cfg,
+                          const struct tgsi_token *tokens,
+                          uint32_t req_local_mem,
+                          struct vrend_shader_key *key,
+                          struct vrend_shader_info *sinfo,
+                          struct vrend_strarray *shader);
 
 const char *vrend_shader_samplertypeconv(bool use_gles, int sampler_type, int *is_shad);
 

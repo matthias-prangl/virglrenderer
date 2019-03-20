@@ -250,17 +250,13 @@ static struct vrend_format_table srgb_formats[] = {
 
   { VIRGL_FORMAT_L8_SRGB, GL_SR8_EXT, GL_RED, GL_UNSIGNED_BYTE, RRR1_SWIZZLE },
   { VIRGL_FORMAT_L8A8_SRGB, GL_SLUMINANCE8_ALPHA8_EXT, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, NO_SWIZZLE },
+  { VIRGL_FORMAT_R8_SRGB, GL_SR8_EXT, GL_RED, GL_UNSIGNED_BYTE, NO_SWIZZLE },
 };
 
 static struct vrend_format_table gl_srgb_formats[] =
 {
   { VIRGL_FORMAT_B8G8R8X8_SRGB, GL_SRGB8_ALPHA8, GL_BGRA, GL_UNSIGNED_BYTE, RGB1_SWIZZLE },
   { VIRGL_FORMAT_B8G8R8A8_SRGB, GL_SRGB8_ALPHA8, GL_BGRA, GL_UNSIGNED_BYTE, NO_SWIZZLE },
-};
-
-static struct vrend_format_table gles_srgb_r8_format[] =
-{
-   { VIRGL_FORMAT_R8_SRGB, GL_SR8_EXT, GL_RED, GL_UNSIGNED_BYTE, NO_SWIZZLE },
 };
 
 static struct vrend_format_table bit10_formats[] = {
@@ -477,8 +473,6 @@ void vrend_build_format_list_gles(void)
    */
   add_formats(gles_bgra_formats);
 
-  add_formats(gles_srgb_r8_format);
-
   /* The Z32 format is required, but OpenGL ES does not support
    * using it as a depth buffer. We just fake support with Z24
    * and hope nobody notices.
@@ -506,6 +500,35 @@ void vrend_check_texture_storage(struct vrend_format_table *table)
       }
    }
 }
+
+bool vrend_check_fremabuffer_mixed_color_attachements()
+{
+   GLuint tex_id[2];
+   GLuint fb_id;
+   bool retval = false;
+
+   glGenTextures(2, tex_id);
+   glGenFramebuffers(1, &fb_id);
+
+   glBindTexture(GL_TEXTURE_2D, tex_id[0]);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 32, 32, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+
+   glBindFramebuffer(GL_FRAMEBUFFER, fb_id);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex_id[0], 0);
+
+   glBindTexture(GL_TEXTURE_2D, tex_id[1]);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, 32, 32, 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, tex_id[1], 0);
+
+
+   retval = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+
+   glDeleteFramebuffers(1, &fb_id);
+   glDeleteTextures(2, tex_id);
+
+   return retval;
+}
+
 
 unsigned vrend_renderer_query_multisample_caps(unsigned max_samples, struct virgl_caps_v2 *caps)
 {

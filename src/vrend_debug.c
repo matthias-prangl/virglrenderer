@@ -73,7 +73,8 @@ static const char *command_names[VIRGL_MAX_COMMANDS] = {
    "SET_FRAMEBUFFER_STATE_NO_ATTACH",
    "TEXTURE_BARRIER",
    "SET_ATOMIC_BUFFERS",
-   "SET_DEBUG_FLAGS"
+   "SET_DEBUG_FLAGS",
+   "GET_QBO_RESULT"
 };
 
 static const char *object_type_names[VIRGL_MAX_OBJECTS] = {
@@ -115,6 +116,7 @@ static const struct debug_named_value vrend_debug_options[] = {
    {"copyres", dbg_copy_resource, "Debug copy resource code path"},
    {"feat", dbg_features, "Log features found"},
    {"tex", dbg_tex, "Log texture operations"},
+   {"caller", dbg_caller, "Log who is creating the context"},
    {"all", dbg_all, "Enable all debugging output"},
    {"guestallow", dbg_allow_guest_override, "Allow the guest to override the debug flags"},
    DEBUG_NAMED_VALUE_END
@@ -174,3 +176,29 @@ int  vrend_debug_can_override(void)
 {
    return vrend_debug_flags & dbg_allow_guest_override;
 }
+
+static
+void vrend_default_debug_callback(const char *fmt, va_list va)
+{
+   vfprintf(stderr, fmt, va);
+}
+
+static virgl_debug_callback_type debug_callback = vrend_default_debug_callback;
+
+void vrend_printf(const char *fmt, ...)
+{
+   if (debug_callback) {
+      va_list va;
+      va_start(va, fmt);
+      debug_callback(fmt, va);
+      va_end(va);
+   }
+}
+
+virgl_debug_callback_type vrend_set_debug_callback(virgl_debug_callback_type cb)
+{
+   virgl_debug_callback_type retval = debug_callback;
+   debug_callback = cb;
+   return retval;
+}
+

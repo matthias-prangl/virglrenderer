@@ -38,6 +38,7 @@
 #include "util/u_memory.h"
 #include "vtest.h"
 #include "vtest_protocol.h"
+#include "virglrenderer.h"
 
 
 
@@ -51,6 +52,10 @@ struct vtest_program
 
    bool do_fork;
    bool loop;
+
+   bool use_glx;
+   bool use_egl_surfaceless;
+   bool use_gles;
 };
 
 struct vtest_program prog = {
@@ -65,12 +70,13 @@ struct vtest_program prog = {
    .loop = true,
 };
 
+static void vtest_main_getenv(void);
 static void vtest_main_parse_args(int argc, char **argv);
 static void vtest_main_set_signal_child(void);
 static void vtest_main_set_signal_segv(void);
 static void vtest_main_open_read_file(void);
 static void vtest_main_open_socket(void);
-static void vtest_main_run_renderer(int in_fd, int out_fd);
+static void vtest_main_run_renderer(int in_fd, int out_fd, int ctx_flags);
 static void vtest_main_wait_for_socket_accept(void);
 static void vtest_main_tidy_fds(void);
 static void vtest_main_close_socket(void);
@@ -82,7 +88,22 @@ int main(int argc, char **argv)
 while (__AFL_LOOP(1000)) {
 #endif
 
+   vtest_main_getenv();
    vtest_main_parse_args(argc, argv);
+
+   int ctx_flags = VIRGL_RENDERER_USE_EGL;
+   if (prog.use_glx) {
+      if (prog.use_egl_surfaceless || prog.use_gles) {
+         fprintf(stderr, "Cannot use surfaceless or GLES with GLX.\n");
+         exit(EXIT_FAILURE);
+      }
+      ctx_flags = VIRGL_RENDERER_USE_GLX;
+   } else {
+      if (prog.use_egl_surfaceless)
+         ctx_flags |= VIRGL_RENDERER_USE_SURFACELESS;
+      if (prog.use_gles)
+         ctx_flags |= VIRGL_RENDERER_USE_GLES;
+   }
 
    if (prog.read_file != NULL) {
       vtest_main_open_read_file();
@@ -102,12 +123,12 @@ start:
       /* fork a renderer process */
       if (fork() == 0) {
          vtest_main_set_signal_segv();
-         vtest_main_run_renderer(prog.in_fd, prog.out_fd);
+         vtest_main_run_renderer(prog.in_fd, prog.out_fd, ctx_flags);
          exit(0);
       }
    } else {
       vtest_main_set_signal_segv();
-      vtest_main_run_renderer(prog.in_fd, prog.out_fd);
+      vtest_main_run_renderer(prog.in_fd, prog.out_fd, ctx_flags);
    }
 
    vtest_main_tidy_fds();
@@ -125,14 +146,20 @@ start:
 
 #define OPT_NO_FORK 'f'
 #define OPT_NO_LOOP_OR_FORK 'l'
+#define OPT_USE_GLX 'x'
+#define OPT_USE_EGL_SURFACELESS 's'
+#define OPT_USE_GLES 'e'
 
 static void vtest_main_parse_args(int argc, char **argv)
 {
    int ret;
 
    static struct option long_options[] = {
-      {"no-fork",         no_argument, NULL, OPT_NO_FORK},
-      {"no-loop-or-fork", no_argument, NULL, OPT_NO_LOOP_OR_FORK},
+      {"no-fork",             no_argument, NULL, OPT_NO_FORK},
+      {"no-loop-or-fork",     no_argument, NULL, OPT_NO_LOOP_OR_FORK},
+      {"use-glx",             no_argument, NULL, OPT_USE_GLX},
+      {"use-egl-surfaceless", no_argument, NULL, OPT_USE_EGL_SURFACELESS},
+      {"use-gles",            no_argument, NULL, OPT_USE_GLES},
       {0, 0, 0, 0}
    };
 
@@ -152,8 +179,18 @@ static void vtest_main_parse_args(int argc, char **argv)
          prog.do_fork = false;
          prog.loop = false;
          break;
+      case OPT_USE_GLX:
+         prog.use_glx = true;
+         break;
+      case OPT_USE_EGL_SURFACELESS:
+         prog.use_egl_surfaceless = true;
+         break;
+      case OPT_USE_GLES:
+         prog.use_gles = true;
+         break;
       default:
-         printf("Usage: %s [--no-fork] [--no-loop-or-fork] [file]\n", argv[0]);
+         printf("Usage: %s [--no-fork] [--no-loop-or-fork] [--use-glx] "
+                "[--use-egl-surfaceless] [--use-egl] [file]\n", argv[0]);
          exit(EXIT_FAILURE);
          break;
       }
@@ -165,6 +202,13 @@ static void vtest_main_parse_args(int argc, char **argv)
       prog.loop = false;
       prog.do_fork = false;
    }
+}
+
+static void vtest_main_getenv(void)
+{
+   prog.use_glx = getenv("VTEST_USE_GLX") != NULL;
+   prog.use_egl_surfaceless = getenv("VTEST_USE_EGL_SURFACELESS") != NULL;
+   prog.use_gles = getenv("VTEST_USE_GLES") != NULL;
 }
 
 static void handler(int sig, siginfo_t *si, void *unused)
@@ -308,7 +352,7 @@ static const vtest_cmd_fptr_t vtest_commands[] = {
    vtest_transfer_put2,
 };
 
-static void vtest_main_run_renderer(int in_fd, int out_fd)
+static void vtest_main_run_renderer(int in_fd, int out_fd, int ctx_flags)
 {
    int err, ret;
    uint32_t header[VTEST_HDR_SIZE];
@@ -334,7 +378,7 @@ static void vtest_main_run_renderer(int in_fd, int out_fd)
             break;
          }
 
-         ret = vtest_create_renderer(in_fd, out_fd, header[0]);
+         ret = vtest_create_renderer(in_fd, out_fd, header[0], ctx_flags);
          if (ret < 0) {
             err = 4;
             break;

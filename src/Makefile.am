@@ -1,5 +1,6 @@
 SUBDIRS := gallium/auxiliary
 AM_LDFLAGS = -lm \
+	$(LIBDRM_LIBS) \
 	$(GBM_LIBS) \
 	$(EPOXY_LIBS) \
 	$(X11_LIBS) \
@@ -51,7 +52,7 @@ endif
 lib_LTLIBRARIES = libvirglrenderer.la
 noinst_LTLIBRARIES = libvrend.la
 
-GM_LDFLAGS = -Wl,-Bsymbolic -version-number 0:2 -no-undefined
+GM_LDFLAGS = -Wl,-Bsymbolic -version-number 0:3 -no-undefined
 
 libvirglrenderer_la_SOURCES = virglrenderer.c
 libvirglrenderer_ladir = $(libdir)

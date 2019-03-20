@@ -29,6 +29,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdarg.h>
 
 struct virgl_box;
 struct iovec;
@@ -110,6 +111,8 @@ struct virgl_renderer_resource_create_args {
 };
 
 /* new API */
+/* This typedef must be kept in sync with vrend_debug.h */
+typedef void (*virgl_debug_callback_type)(const char *fmt, va_list ap);
 
 VIRGL_EXPORT int virgl_renderer_resource_create(struct virgl_renderer_resource_create_args *args, struct iovec *iov, uint32_t num_iovs);
 VIRGL_EXPORT int virgl_renderer_resource_import_eglimage(struct virgl_renderer_resource_create_args *args, void *image);
@@ -158,6 +161,8 @@ VIRGL_EXPORT void virgl_renderer_force_ctx_0(void);
 
 VIRGL_EXPORT void virgl_renderer_ctx_attach_resource(int ctx_id, int res_handle);
 VIRGL_EXPORT void virgl_renderer_ctx_detach_resource(int ctx_id, int res_handle);
+
+VIRGL_EXPORT virgl_debug_callback_type virgl_set_debug_callback(virgl_debug_callback_type cb);
 
 /* return information about a resource */
 

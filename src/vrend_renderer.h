@@ -91,9 +91,11 @@ struct vrend_transfer_info {
    int level;
    uint32_t stride;
    uint32_t layer_stride;
+   uint32_t usage;
    unsigned int iovec_cnt;
    struct iovec *iovec;
    uint64_t offset;
+   bool context0;
    struct pipe_box *box;
 };
 
@@ -110,6 +112,8 @@ struct vrend_if_cbs {
 int vrend_renderer_init(struct vrend_if_cbs *cbs, uint32_t flags);
 
 void vrend_insert_format(struct vrend_format_table *entry, uint32_t bindings);
+bool vrend_check_fremabuffer_mixed_color_attachements(void);
+
 void vrend_insert_format_swizzle(int override_format, struct vrend_format_table *entry, uint32_t bindings, uint8_t swizzle[4]);
 const struct vrend_format_table *vrend_get_format_table_entry(enum virgl_formats format);
 int vrend_create_shader(struct vrend_context *ctx,
@@ -196,7 +200,7 @@ void vrend_bind_vertex_elements_state(struct vrend_context *ctx,
                                       uint32_t handle);
 
 void vrend_set_single_vbo(struct vrend_context *ctx,
-                          int index,
+                          uint32_t index,
                           uint32_t stride,
                           uint32_t buffer_offset,
                           uint32_t res_handle);
@@ -213,7 +217,7 @@ void vrend_set_viewport_states(struct vrend_context *ctx,
 void vrend_set_num_sampler_views(struct vrend_context *ctx,
                                  uint32_t shader_type,
                                  uint32_t start_slot,
-                                 int num_sampler_views);
+                                 uint32_t num_sampler_views);
 void vrend_set_single_sampler_view(struct vrend_context *ctx,
                                    uint32_t shader_type,
                                    uint32_t index,
@@ -237,17 +241,17 @@ void vrend_set_index_buffer(struct vrend_context *ctx,
                             uint32_t offset);
 void vrend_set_single_image_view(struct vrend_context *ctx,
                                  uint32_t shader_type,
-                                 int index,
+                                 uint32_t index,
                                  uint32_t format, uint32_t access,
                                  uint32_t layer_offset, uint32_t level_size,
                                  uint32_t handle);
 void vrend_set_single_ssbo(struct vrend_context *ctx,
                            uint32_t shader_type,
-                           int index,
+                           uint32_t index,
                            uint32_t offset, uint32_t length,
                            uint32_t handle);
 void vrend_set_single_abo(struct vrend_context *ctx,
-                          int index,
+                          uint32_t index,
                           uint32_t offset, uint32_t length,
                           uint32_t handle);
 void vrend_memory_barrier(struct vrend_context *ctx,
@@ -262,8 +266,6 @@ void vrend_set_framebuffer_state_no_attach(struct vrend_context *ctx,
                                            uint32_t layers, uint32_t samples);
 void vrend_texture_barrier(struct vrend_context *ctx,
                            unsigned flags);
-#define VREND_TRANSFER_WRITE 1
-#define VREND_TRANSFER_READ 2
 int vrend_renderer_transfer_iov(const struct vrend_transfer_info *info, int transfer_mode);
 
 void vrend_renderer_resource_copy_region(struct vrend_context *ctx,
@@ -324,6 +326,10 @@ int vrend_begin_query(struct vrend_context *ctx, uint32_t handle);
 int vrend_end_query(struct vrend_context *ctx, uint32_t handle);
 void vrend_get_query_result(struct vrend_context *ctx, uint32_t handle,
                             uint32_t wait);
+void vrend_get_query_result_qbo(struct vrend_context *ctx, uint32_t handle,
+                                uint32_t qbo_handle,
+                                uint32_t wait, uint32_t result_type, uint32_t offset,
+                                int32_t index);
 void vrend_render_condition(struct vrend_context *ctx,
                             uint32_t handle,
                             bool condtion,
@@ -348,7 +354,7 @@ int vrend_renderer_resource_attach_iov(int res_handle, struct iovec *iov,
 void vrend_renderer_resource_detach_iov(int res_handle,
                                         struct iovec **iov_p,
                                         int *num_iovs_p);
-void vrend_renderer_resource_destroy(struct vrend_resource *res, bool remove);
+void vrend_renderer_resource_destroy(struct vrend_resource *res);
 
 static inline void
 vrend_resource_reference(struct vrend_resource **ptr, struct vrend_resource *tex)
@@ -356,7 +362,7 @@ vrend_resource_reference(struct vrend_resource **ptr, struct vrend_resource *tex
    struct vrend_resource *old_tex = *ptr;
 
    if (pipe_reference(&(*ptr)->base.reference, &tex->base.reference))
-      vrend_renderer_resource_destroy(old_tex, true);
+      vrend_renderer_resource_destroy(old_tex);
    *ptr = tex;
 }
 
@@ -401,8 +407,7 @@ boolean format_is_copy_compatible(enum pipe_format src, enum pipe_format dst,
                                   boolean allow_compressed);
 
 /* blitter interface */
-void vrend_renderer_blit_gl(struct vrend_context *ctx,
-                            struct vrend_resource *src_res,
+void vrend_renderer_blit_gl(struct vrend_resource *src_res,
                             struct vrend_resource *dst_res,
                             const struct pipe_blit_info *info,
                             bool has_texture_srgb_decode,
